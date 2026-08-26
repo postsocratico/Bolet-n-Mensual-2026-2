@@ -3755,12 +3755,13 @@ def load_investigacion_fmi(start_date_str, end_date_str):
     return df
 
 @st.cache_data(show_spinner=False)
-def load_investigacion_bm(start_date_str, end_date_str):
-    """Extractor para Investigación del BM (Filtra y excluye los que son 'Reports')"""
+from urllib.parse import urlencode, quote
+
+def load_investigacion_bm(start_date_str, end_date_str, doctype="Working Papers"):
+    """Extractor para Investigación del BM, filtrando por doctype en la propia API."""
     base_url = "https://openknowledge.worldbank.org/server/api/discover/search/objects"
     headers = {'User-Agent': 'Mozilla/5.0'}
 
-    # ID exacto de la comunidad de Investigación
     scope_id = '06251f8a-62c2-59fb-add5-ec0993fc20d9'
 
     try:
@@ -3773,12 +3774,14 @@ def load_investigacion_bm(start_date_str, end_date_str):
         try:
             params = {
                 'scope': scope_id,
+                'f.doctype': f'{doctype},equals',   # -> f.doctype=Working%20Papers,equals
                 'sort': 'dc.date.issued,DESC',
                 'page': page,
                 'size': 20
             }
-            res = requests.get(base_url, headers=headers,
-                               params=params, timeout=15)
+            # quote_via=quote -> espacio = %20 ; safe=',' -> la coma no se escapa
+            url = f"{base_url}?{urlencode(params, quote_via=quote, safe=',')}"
+            res = requests.get(url, headers=headers, timeout=15)
             data = res.json()
 
             objects = data.get('_embedded', {}).get(
@@ -3791,11 +3794,8 @@ def load_investigacion_bm(start_date_str, end_date_str):
                 item = obj.get('_embedded', {}).get('indexableObject', {})
                 meta = item.get('metadata', {})
 
-                # Extraer Título y Fecha
-                title = meta.get('dc.title', [{'value': ''}])[
-                    0].get('value', '')
-                date_s = meta.get('dc.date.issued', [{'value': ''}])[
-                    0].get('value', '')
+                title = meta.get('dc.title', [{'value': ''}])[0].get('value', '')
+                date_s = meta.get('dc.date.issued', [{'value': ''}])[0].get('value', '')
 
                 parsed_date = None
                 if date_s:
@@ -3807,65 +3807,33 @@ def load_investigacion_bm(start_date_str, end_date_str):
                 if not parsed_date or parsed_date < start_date:
                     continue
 
-                # --- NUEVO FILTRO ANTI-REPORTES ---
-                # Buscamos en el abstract o en la descripción general
-                abstract_list = meta.get('dc.description.abstract', [])
-                desc_list = meta.get('dc.description', [])
-
-                description = ""
-                if abstract_list:
-                    description = abstract_list[0].get('value', '').lower()
-                elif desc_list:
-                    description = desc_list[0].get('value', '').lower()
-
-                # Si la palabra exacta "report" está en la descripción, lo saltamos
-                # Usamos \b para que sea la palabra exacta y no algo como "reporting"
-                if re.search(r'\breport\b', description):
-                    continue
-                # ----------------------------------
-
-                # Link permanente
-                link = meta.get('dc.identifier.uri', [{'value': ''}])[
-                    0].get('value', '')
+                link = meta.get('dc.identifier.uri', [{'value': ''}])[0].get('value', '')
                 if not link:
                     link = f"https://openknowledge.worldbank.org/entities/publication/{item.get('id', '')}"
 
                 if not any(r['Link'] == link for r in rows):
                     rows.append({"Date": parsed_date, "Title": title,
-                                "Link": link, "Organismo": "BM"})
+                                 "Link": link, "Organismo": "BM"})
                     items_found += 1
 
             if items_found == 0:
                 break
             page += 1
             if page > 3:
-                break  # Límite para evitar búsquedas infinitas
+                break
             time.sleep(0.2)
         except:
             break
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        # 🔧 1. Convertir a datetime y FORZAR eliminación de timezone
         df["Date"] = pd.to_datetime(df["Date"], errors='coerce', utc=False)
         if df["Date"].dt.tz is not None:
             df["Date"] = df["Date"].dt.tz_localize(None)
-        
-        # 🔧 2. Eliminar filas con fecha inválida
         df = df.dropna(subset=['Date'])
-        
-        # 🔧 3. Eliminar duplicados por Link (importante)
         df = df.drop_duplicates(subset=['Link'])
-        
-        # 🔧 4. Ordenar por fecha descendente
         df = df.sort_values("Date", ascending=False)
-        
-        # 🔧 5. DEPURACIÓN (opcional, pero ayuda a detectar problemas)
-        print(f"📊 BM Investigación - Total después de limpieza: {len(df)}")
-        if not df.empty:
-            print(f"   📅 Meses en los datos: {sorted(df['Date'].dt.month.unique())}")
-            print(f"   📅 Años en los datos: {sorted(df['Date'].dt.year.unique())}")
-    
+        print(f"📊 BM ({doctype}) - Total después de limpieza: {len(df)}")
     return df
 
 ## OCDE - INVESTIGACION
