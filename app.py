@@ -3757,83 +3757,138 @@ def load_investigacion_fmi(start_date_str, end_date_str):
 @st.cache_data(show_spinner=False)
 from urllib.parse import urlencode, quote
 
-def load_investigacion_bm(start_date_str, end_date_str, doctype="Working Papers"):
-    """Extractor para Investigación del BM, filtrando por doctype en la propia API."""
-    base_url = "https://openknowledge.worldbank.org/server/api/discover/search/objects"
-    headers = {'User-Agent': 'Mozilla/5.0'}
+DOCTYPES_INVESTIGACION = [
+    "Policy Research Working Paper",
+    "Working Paper (Numbered Series)",
+    "Working Paper",
+]
 
-    scope_id = '06251f8a-62c2-59fb-add5-ec0993fc20d9'
+
+def load_investigacion_bm(start_date_str, end_date_str):
+    """Extractor para Investigación del BM (working papers) vía API de DSpace,
+    filtrando por doctype con el facet nativo del repositorio."""
+    base_url = "https://openknowledge.worldbank.org/server/api/discover/search/objects"
+    headers = {"User-Agent": "Mozilla/5.0"}
+    scope_id = "06251f8a-62c2-59fb-add5-ec0993fc20d9"
 
     try:
-        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
-    except:
+        start_date = datetime.datetime.strptime(start_date_str, "%d.%m.%Y")
+        end_date = datetime.datetime.strptime(end_date_str, "%d.%m.%Y")
+        print(f"📅 BM Investigación: {start_date.date()} a {end_date.date()}")
+    except Exception:
         start_date = datetime.datetime(2000, 1, 1)
+        end_date = datetime.datetime.now()
 
-    rows, page = [], 0
-    while True:
-        try:
-            params = {
-                'scope': scope_id,
-                'f.doctype': f'{doctype},equals',   # -> f.doctype=Working%20Papers,equals
-                'sort': 'dc.date.issued,DESC',
-                'page': page,
-                'size': 20
-            }
-            # quote_via=quote -> espacio = %20 ; safe=',' -> la coma no se escapa
-            url = f"{base_url}?{urlencode(params, quote_via=quote, safe=',')}"
-            res = requests.get(url, headers=headers, timeout=15)
-            data = res.json()
+    def _fetch(doctypes):
+        """Pagina la búsqueda para una o varias etiquetas de doctype."""
+        rows, seen = [], set()
+        page, max_pages = 0, 10
 
-            objects = data.get('_embedded', {}).get(
-                'searchResult', {}).get('_embedded', {}).get('objects', [])
-            if not objects:
-                break
+        while page < max_pages:
+            try:
+                params = [
+                    ("scope", scope_id),
+                    ("sort", "dc.date.issued,DESC"),
+                    ("page", page),
+                    ("size", 50),
+                    *[("f.doctype", f"{d},equals") for d in doctypes],
+                ]
+                # quote_via=quote -> espacio como %20 ; safe="," -> la coma de ",equals" intacta
+                qs = urlencode(params, quote_via=quote, safe=",")
+                res = requests.get(base_url, headers=headers, params=qs, timeout=15)
+                print(f"🔗 [{res.status_code}] {res.url}")
+                res.raise_for_status()
+                data = res.json()
 
-            items_found = 0
-            for obj in objects:
-                item = obj.get('_embedded', {}).get('indexableObject', {})
-                meta = item.get('metadata', {})
+                objects = (
+                    data.get("_embedded", {})
+                    .get("searchResult", {})
+                    .get("_embedded", {})
+                    .get("objects", [])
+                )
+                if not objects:
+                    print(f"📭 Sin resultados en página {page}")
+                    break
 
-                title = meta.get('dc.title', [{'value': ''}])[0].get('value', '')
-                date_s = meta.get('dc.date.issued', [{'value': ''}])[0].get('value', '')
+                print(f"📄 Página {page + 1}: {len(objects)} objetos")
 
-                parsed_date = None
-                if date_s:
+                items_found = 0
+                for obj in objects:
+                    item = obj.get("_embedded", {}).get("indexableObject", {})
+                    meta = item.get("metadata", {})
+
+                    title = meta.get("dc.title", [{"value": ""}])[0].get("value", "")
+                    if not title:
+                        continue
+
+                    date_s = meta.get("dc.date.issued", [{"value": ""}])[0].get("value", "")
+                    if not date_s:
+                        continue
+
                     try:
                         parsed_date = parser.parse(date_s)
-                    except:
-                        pass
+                        if parsed_date.tzinfo is not None:
+                            parsed_date = parsed_date.replace(tzinfo=None)
+                    except Exception:
+                        continue
 
-                if not parsed_date or parsed_date < start_date:
-                    continue
+                    if parsed_date < start_date or parsed_date > end_date:
+                        continue
 
-                link = meta.get('dc.identifier.uri', [{'value': ''}])[0].get('value', '')
-                if not link:
-                    link = f"https://openknowledge.worldbank.org/entities/publication/{item.get('id', '')}"
+                    link = meta.get("dc.identifier.uri", [{"value": ""}])[0].get("value", "")
+                    if not link:
+                        link = (
+                            "https://openknowledge.worldbank.org/entities/publication/"
+                            f"{item.get('id', '')}"
+                        )
 
-                if not any(r['Link'] == link for r in rows):
-                    rows.append({"Date": parsed_date, "Title": title,
-                                 "Link": link, "Organismo": "BM"})
+                    if link in seen:
+                        continue
+                    seen.add(link)
+
+                    rows.append({
+                        "Date": parsed_date,
+                        "Title": title,
+                        "Link": link,
+                        "Organismo": "BM",
+                    })
                     items_found += 1
+                    print(f"   ✅ {parsed_date.date()} - {title[:60]}...")
 
-            if items_found == 0:
+                print(f"   📊 Documentos en página {page + 1}: {items_found}")
+
+                if items_found == 0 and page > 1:
+                    break
+
+                page += 1
+                time.sleep(0.5)
+
+            except Exception as e:
+                print(f"⚠️ Error en página {page}: {type(e).__name__}: {e}")
                 break
-            page += 1
-            if page > 3:
-                break
-            time.sleep(0.2)
-        except:
-            break
+
+        return rows
+
+    # Intento 1: los tres doctypes en una sola query (facets repetidos = OR en DSpace)
+    rows = _fetch(DOCTYPES_INVESTIGACION)
+
+    # Intento 2 (respaldo): si el OR no funciona, una petición por doctype
+    if not rows:
+        print("↩️ Query combinada vacía; reintentando doctype por doctype")
+        for d in DOCTYPES_INVESTIGACION:
+            print(f"— doctype: {d}")
+            rows.extend(_fetch([d]))
 
     df = pd.DataFrame(rows)
     if not df.empty:
-        df["Date"] = pd.to_datetime(df["Date"], errors='coerce', utc=False)
+        df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
         if df["Date"].dt.tz is not None:
             df["Date"] = df["Date"].dt.tz_localize(None)
-        df = df.dropna(subset=['Date'])
-        df = df.drop_duplicates(subset=['Link'])
+        df = df.dropna(subset=["Date"])
+        df = df.drop_duplicates(subset=["Link"])
         df = df.sort_values("Date", ascending=False)
-        print(f"📊 BM ({doctype}) - Total después de limpieza: {len(df)}")
+
+    print(f"✅ BM Investigación - Total: {len(df)} documentos")
     return df
 
 ## OCDE - INVESTIGACION
