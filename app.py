@@ -3754,22 +3754,23 @@ def load_investigacion_fmi(start_date_str, end_date_str):
     
     return df
 
-@st.cache_data(show_spinner=False)
 from urllib.parse import urlencode, quote
 
-DOCTYPES_INVESTIGACION = [
-    "Policy Research Working Paper",
-    "Working Paper (Numbered Series)",
-    "Working Paper",
-]
 
 
+@st.cache_data(show_spinner=False)
 def load_investigacion_bm(start_date_str, end_date_str):
     """Extractor para Investigación del BM (working papers) vía API de DSpace,
     filtrando por doctype con el facet nativo del repositorio."""
     base_url = "https://openknowledge.worldbank.org/server/api/discover/search/objects"
     headers = {"User-Agent": "Mozilla/5.0"}
     scope_id = "06251f8a-62c2-59fb-add5-ec0993fc20d9"
+
+    DOCTYPES_INVESTIGACION = [
+    "Policy Research Working Paper",
+    "Working Paper (Numbered Series)",
+    "Working Paper",
+]
 
     try:
         start_date = datetime.datetime.strptime(start_date_str, "%d.%m.%Y")
