@@ -2232,94 +2232,111 @@ def load_pub_inst_bpi(start_date_str, end_date_str):
 
 @st.cache_data(show_spinner=False)
 def load_country_reports_fmi(start_date_str, end_date_str):
-    """Extractor FMI - Country Reports + Article IV (Conexión Directa a Coveo API) con filtro anti-Coming Soon"""
+    """Extractor para Reportes de País (Artículo IV) del FMI usando la API de Crossref."""
+    base_url = "https://api.crossref.org/works"
+    mailto = "postsocratico@comunidad.unam.mx"
+    headers = {"User-Agent": f"Mozilla/5.0 (mailto:{mailto})"}
+
     try:
-        start_date = datetime.datetime.strptime(start_date_str, '%d.%m.%Y')
-        end_date = datetime.datetime.strptime(end_date_str, '%d.%m.%Y')
-        print(f"📅 FMI Country Reports: {start_date.date()} a {end_date.date()}")
-    except:
+        start_date = datetime.datetime.strptime(start_date_str, "%d.%m.%Y")
+        end_date = datetime.datetime.strptime(end_date_str, "%d.%m.%Y")
+        print(f"📅 FMI Artículo IV: {start_date.date()} a {end_date.date()}")
+    except Exception:
         start_date = datetime.datetime(2000, 1, 1)
-        end_date = datetime.datetime.now() + datetime.timedelta(days=365)
-        print(f"⚠️ Error en fechas, usando rango por defecto")
+        end_date = datetime.datetime.now()
+
+    # Los filtros de Crossref se concatenan con comas en un solo parámetro
+    filtro = ",".join([
+        "member:3029",
+        f"from-created-date:{start_date.strftime('%Y-%m-%d')}",
+        f"until-created-date:{end_date.strftime('%Y-%m-%d')}",
+        "container-title:IMF Staff Country Reports",
+    ])
 
     rows = []
+    cursor = "*"
+    page = 0
+    max_pages = 10
 
-    # 1. EL ENDPOINT Y LA LLAVE MAESTRA QUE DESCUBRISTE
-    url = "https://imfproduction561s308u.org.coveo.com/rest/search/v2?organizationId=imfproduction561s308u"
+    while page < max_pages:
+        try:
+            params = {
+                "filter": filtro,
+                "mailto": mailto,
+                "rows": 100,
+                "cursor": cursor,
+            }
+            res = requests.get(base_url, headers=headers, params=params, timeout=15)
+            message = res.json().get("message", {})
+            items = message.get("items", [])
 
-    headers = {
-        "Authorization": "Bearer xx742a6c66-f427-4f5a-ae1e-770dc7264e8a",
-        "Content-Type": "application/json",
-        "Accept": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
+            if not items:
+                print(f"📭 No hay más resultados en página {page}")
+                break
 
-    # 2. EL PAYLOAD (Falsificamos la petición del buscador)
-    payload = {
-        "aq": "@imfseries==\"IMF Staff Country Reports\" OR @imftype==\"Article IV Staff Reports\"",  # Filtro estricto por la Serie
-        "numberOfResults": 150,  # Cantidad a traer (Suficiente para un mes)
-        "sortCriteria": "@imfdate descending"  # Los más recientes primero
-    }
+            print(f"📄 Página {page + 1}: {len(items)} objetos encontrados")
 
-    try:
-        print("📡 Solicitando Country Reports + Article IV a la API de Coveo...")
-        import urllib3
-        urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-        # Hacemos un POST directo a la base de datos de Coveo
-        res = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+            items_found = 0
+            for it in items:
+                # title y subtitle son listas en Crossref
+                title = " ".join(it.get("title") or []).strip()
+                subtitle = " ".join(it.get("subtitle") or []).strip()
 
-
-        if res.status_code == 200:
-            data = res.json()
-            print(f"✅ Respuesta recibida. Total en API: {data.get('totalCount', 0)} resultados")
-
-            # 3. EXTRACCIÓN (Limpia y sin HTML)
-            for item in data.get("results", []):
-                titulo = item.get("title", "")
-                link = item.get("clickUri", "")
-
-                # La fecha viene en timestamp (milisegundos). Lo dividimos entre 1000 para segundos.
-                raw_date = item.get("raw", {}).get("date")
-
-                # 🚫 FILTRO: Saltar documentos "Coming Soon"
-                if "coming soon" in titulo.lower():
-                    print(f"   ⏭️ Country Reports - Excluido 'Coming Soon': {titulo[:60]}...")
-                    continue  # Salta este documento y pasa al siguiente
-
-                # Validación básica
-                if not titulo or not link or not raw_date:
+                if not title:
+                    continue
+                if "Article IV" not in subtitle:
                     continue
 
-                # Parsear fecha
+                date_s = (it.get("created") or {}).get("date-time", "")
+                if not date_s:
+                    continue
                 try:
-                    parsed_date = datetime.datetime.fromtimestamp(raw_date / 1000.0)
-                except:
+                    parsed_date = parser.parse(date_s)
+                    if parsed_date.tzinfo is not None:
+                        parsed_date = parsed_date.replace(tzinfo=None)
+                except Exception:
                     continue
 
-                # ✅ FILTRO DE FECHAS MEJORADO (rango completo)
                 if parsed_date < start_date or parsed_date > end_date:
                     continue
 
-                # Evitar duplicados
-                if not any(r['Link'] == link for r in rows):
+                doi = it.get("DOI", "")
+                if not doi:
+                    continue
+                link = f"https://doi.org/{doi}"
+
+                full_title = f"{title}: {subtitle}" if subtitle else title
+
+                if not any(r["Link"] == link for r in rows):
                     rows.append({
                         "Date": parsed_date,
-                        "Title": titulo,
+                        "Title": full_title,
                         "Link": link,
-                        "Organismo": "FMI"
+                        "Organismo": "FMI",
                     })
-                    
-            print(f"✅ Total de documentos filtrados: {len(rows)}")
-        else:
-            print(f"❌ Error en la API: {res.status_code}")
+                    items_found += 1
+                    print(f"   ✅ {parsed_date.date()} - {full_title[:60]}...")
 
-    except Exception as e:
-        print(f"❌ Error en load_country_reports_fmi: {e}")
+            print(f"   📊 Documentos en página {page + 1}: {items_found}")
+
+            cursor = message.get("next-cursor")
+            if not cursor:
+                break
+
+            page += 1
+            time.sleep(0.5)
+
+        except Exception as e:
+            print(f"⚠️ Error en página {page}: {e}")
+            break
 
     df = pd.DataFrame(rows)
     if not df.empty:
         df["Date"] = pd.to_datetime(df["Date"])
         df = df.sort_values("Date", ascending=False)
+        df = df.drop_duplicates(subset=["Link"])
+
+    print(f"✅ FMI Artículo IV - Total: {len(df)} documentos")
     return df
 
 
