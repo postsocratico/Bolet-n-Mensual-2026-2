@@ -3786,7 +3786,7 @@ def load_investigacion_bm(start_date_str, end_date_str):
     DOCTYPES_INVESTIGACION = [
     "Policy Research Working Paper",
     "Working Paper (Numbered Series)",
-    "Working Paper",
+    "Working Paper"
 ]
 
     try:
